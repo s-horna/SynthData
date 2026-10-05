@@ -1,0 +1,112 @@
+# Single source of truth for model IDs, caps and ratios.
+# Nothing in code hardcodes a model slug, price, cap or ratio.
+
+openrouter:
+  endpoint: https://openrouter.ai/api/v1
+  api_key_env: OPENROUTER_API_KEY
+
+# Checkpoint 1: `python -m generate.generate check` prints
+# context length and live per-token prices for each. Set `confirmed: true` only after
+# the slugs/prices have been approved; paid commands refuse to run until then.
+models:
+  confirmed: true  # Checkpoint 1 approved 2026-10-05
+  teacher:
+    alias: teacher
+    slug: deepseek/deepseek-v4-pro
+    license: MIT
+    temperature: 0.7
+    max_tokens: 8192
+    max_parallel_requests: 8
+    timeout: 300
+    # OpenRouter request extras. require_parameters routes only to providers that
+    # support every request param (incl. `tools`). Pin with `provider.only` if needed.
+    extra_body:
+      reasoning: {enabled: true}
+      provider: {require_parameters: true}
+  cheap:
+    alias: cheap
+    slug: deepseek/deepseek-v4-flash
+    license: MIT
+    temperature: 0.9
+    max_tokens: 1024
+    max_parallel_requests: 16
+    timeout: 120
+    extra_body:
+      reasoning: {enabled: false}
+  judge:
+    alias: judge
+    slug: z-ai/glm-5.2
+    license: MIT
+    temperature: 0.0
+    max_tokens: 2048
+    max_parallel_requests: 8
+    timeout: 180
+    extra_body: {}
+
+budget:
+  pilot_usd: 25.0          # hard cap for preview + pilot, enforced in code
+  full_run_usd: null       # must be set (after Checkpoint 2) before `run --full`
+  settle_seconds: 30       # wait for OpenRouter usage counters to settle between shards
+  keep_rate_assumption: 0.45  # used for projections until Phase 4 measures the real keep rate
+  target_kept: 5000
+
+library:
+  # Whole domains held out for evaluation; never sampled into training toolsets.
+  heldout_domains: [travel, hr, maps, time]
+
+paths:
+  tool_library: tools/library/tools.jsonl     # Phase 1 output
+  domain_split: tools/library/split.json      # {"train_domains": [...], "heldout_domains": [...]}
+  raw: data/raw
+  mock_cache: data/cache/mock_responses.sqlite
+
+generation:
+  seed: 1234
+  preview_records: 50
+  target_generated: 12000
+  # Each shard runs one Data Designer job. Data Designer caches an MCP provider's tool
+  # list, so every distinct toolset is served by its own mock-server "slot".
+  slots_per_shard: 16
+  rows_per_slot: 3
+  toolset:
+    small_range: [3, 20]
+    large_range: [30, 60]
+    large_prob: 0.1
+    distractor_frac: 0.35   # fraction of the toolset drawn from look-alike tools
+  scenario_weights:
+    single_call: 0.25
+    sequential_multi: 0.20
+    parallel: 0.15
+    no_tool_fits: 0.12
+    needs_clarification: 0.13
+    error_recovery: 0.15
+  phrasing_styles: [terse, verbose, typos, non-native English]
+  phrasing_weights: [3, 3, 1, 1]
+  difficulties: [easy, medium, hard]
+  difficulty_weights: [3, 4, 2]
+  personas:
+    - small business owner
+    - software engineer on call
+    - executive assistant
+    - data analyst
+    - student
+    - customer support agent
+    - home user managing smart devices
+    - sales rep
+    - finance manager
+    - non-technical retiree
+    - DevOps engineer
+    - recruiter
+  max_tool_call_turns: 8
+  tool_timeout_sec: 60
+
+mock_server:
+  base_error_rate: 0.07          # target 5-10%
+  error_recovery_error_rate: 0.6 # slots that host error_recovery rows
+  transient_retry_success: 0.85  # P(success) when a transient error is retried
+  error_types:
+    timeout: 0.3
+    not_found: 0.25
+    permission_denied: 0.2
+    rate_limit: 0.25
+  deterministic: true

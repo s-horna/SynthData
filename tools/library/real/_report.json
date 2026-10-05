@@ -1,0 +1,322 @@
+[
+  {
+    "server": "modelcontextprotocol__server-filesystem",
+    "status": "skipped: license not verified permissive (SEE LICENSE IN LICENSE)"
+  },
+  {
+    "server": "modelcontextprotocol__server-memory",
+    "status": "skipped: license not verified permissive (SEE LICENSE IN LICENSE)"
+  },
+  {
+    "server": "modelcontextprotocol__server-everything",
+    "status": "skipped: license not verified permissive (SEE LICENSE IN LICENSE)"
+  },
+  {
+    "server": "modelcontextprotocol__server-sequential-thinking",
+    "status": "skipped: license not verified permissive (SEE LICENSE IN LICENSE)"
+  },
+  {
+    "server": "modelcontextprotocol__server-github",
+    "status": "ok",
+    "tools": 26,
+    "invalid": 0,
+    "license": "MIT",
+    "version": "2025.4.8"
+  },
+  {
+    "server": "modelcontextprotocol__server-gitlab",
+    "status": "ok",
+    "tools": 9,
+    "invalid": 0,
+    "license": "MIT",
+    "version": "2025.4.25"
+  },
+  {
+    "server": "modelcontextprotocol__server-slack",
+    "status": "ok",
+    "tools": 8,
+    "invalid": 0,
+    "license": "MIT",
+    "version": "2025.4.25"
+  },
+  {
+    "server": "modelcontextprotocol__server-brave-search",
+    "status": "ok",
+    "tools": 2,
+    "invalid": 0,
+    "license": "MIT",
+    "version": "0.6.2"
+  },
+  {
+    "server": "modelcontextprotocol__server-google-maps",
+    "status": "ok",
+    "tools": 7,
+    "invalid": 0,
+    "license": "MIT",
+    "version": "0.6.2"
+  },
+  {
+    "server": "modelcontextprotocol__server-postgres",
+    "status": "ok",
+    "tools": 1,
+    "invalid": 0,
+    "license": "MIT",
+    "version": "0.6.2"
+  },
+  {
+    "server": "modelcontextprotocol__server-redis",
+    "status": "failed: ExceptionGroup: unhandled errors in a TaskGroup (1 sub-exception)"
+  },
+  {
+    "server": "modelcontextprotocol__server-aws-kb-retrieval",
+    "status": "ok",
+    "tools": 1,
+    "invalid": 0,
+    "license": "MIT",
+    "version": "0.6.2"
+  },
+  {
+    "server": "modelcontextprotocol__server-everart",
+    "status": "ok",
+    "tools": 1,
+    "invalid": 0,
+    "license": "MIT",
+    "version": "0.6.2"
+  },
+  {
+    "server": "mcp-server-git",
+    "status": "ok",
+    "tools": 12,
+    "invalid": 0,
+    "license": "MIT",
+    "version": "2026.8.18"
+  },
+  {
+    "server": "mcp-server-fetch",
+    "status": "ok",
+    "tools": 1,
+    "invalid": 0,
+    "license": "MIT",
+    "version": "2026.8.18"
+  },
+  {
+    "server": "mcp-server-time",
+    "status": "ok",
+    "tools": 2,
+    "invalid": 0,
+    "license": "MIT",
+    "version": "2026.8.18"
+  },
+  {
+    "server": "notionhq__notion-mcp-server",
+    "status": "ok",
+    "tools": 24,
+    "invalid": 0,
+    "license": "MIT",
+    "version": "2.5.2"
+  },
+  {
+    "server": "playwright__mcp",
+    "status": "ok",
+    "tools": 25,
+    "invalid": 0,
+    "license": "Apache-2.0",
+    "version": "0.0.83"
+  },
+  {
+    "server": "stripe__mcp",
+    "status": "failed: TimeoutError: "
+  },
+  {
+    "server": "supabase__mcp-server-supabase",
+    "status": "ok",
+    "tools": 29,
+    "invalid": 0,
+    "license": "Apache-2.0",
+    "version": "0.13.0"
+  },
+  {
+    "server": "upstash__context7-mcp",
+    "status": "ok",
+    "tools": 2,
+    "invalid": 0,
+    "license": "MIT",
+    "version": "4.1.1"
+  },
+  {
+    "server": "firecrawl-mcp",
+    "status": "ok",
+    "tools": 27,
+    "invalid": 0,
+    "license": "MIT",
+    "version": "3.27.3"
+  },
+  {
+    "server": "browserbasehq__mcp",
+    "status": "ok",
+    "tools": 6,
+    "invalid": 0,
+    "license": "Apache-2.0",
+    "version": "3.0.0"
+  },
+  {
+    "server": "heroku__mcp-server",
+    "status": "failed: ExceptionGroup: unhandled errors in a TaskGroup (1 sub-exception)"
+  },
+  {
+    "server": "mcp-server-kubernetes",
+    "status": "ok",
+    "tools": 23,
+    "invalid": 0,
+    "license": "MIT",
+    "version": "4.1.9"
+  },
+  {
+    "server": "azure__mcp",
+    "status": "ok",
+    "tools": 70,
+    "invalid": 0,
+    "license": "MIT",
+    "version": "3.0.0-beta.49"
+  },
+  {
+    "server": "hubspot__mcp-server",
+    "status": "ok",
+    "tools": 21,
+    "invalid": 0,
+    "license": "MIT",
+    "version": "0.4.0"
+  },
+  {
+    "server": "twilio-alpha__mcp",
+    "status": "failed: ExceptionGroup: unhandled errors in a TaskGroup (1 sub-exception)"
+  },
+  {
+    "server": "shopify__dev-mcp",
+    "status": "ok",
+    "tools": 5,
+    "invalid": 0,
+    "license": "ISC",
+    "version": "1.16.0"
+  },
+  {
+    "server": "elastic__mcp-server-elasticsearch",
+    "status": "ok",
+    "tools": 4,
+    "invalid": 0,
+    "license": "Apache-2.0",
+    "version": "0.3.1"
+  },
+  {
+    "server": "neondatabase__mcp-server-neon",
+    "status": "failed: ExceptionGroup: unhandled errors in a TaskGroup (1 sub-exception)"
+  },
+  {
+    "server": "tavily-mcp",
+    "status": "ok",
+    "tools": 5,
+    "invalid": 0,
+    "license": "MIT",
+    "version": "0.2.22"
+  },
+  {
+    "server": "kimtaeyoon83__mcp-server-youtube-transcript",
+    "status": "ok",
+    "tools": 1,
+    "invalid": 0,
+    "license": "MIT",
+    "version": "0.1.1"
+  },
+  {
+    "server": "mongodb-mcp-server",
+    "status": "failed: ExceptionGroup: unhandled errors in a TaskGroup (1 sub-exception)"
+  },
+  {
+    "server": "circleci__mcp-server-circleci",
+    "status": "ok",
+    "tools": 13,
+    "invalid": 0,
+    "license": "Apache-2.0",
+    "version": "0.20.0"
+  },
+  {
+    "server": "apify__actors-mcp-server",
+    "status": "ok",
+    "tools": 10,
+    "invalid": 0,
+    "license": "MIT",
+    "version": "0.17.2"
+  },
+  {
+    "server": "mastra__mcp-docs-server",
+    "status": "ok",
+    "tools": 13,
+    "invalid": 0,
+    "license": "Apache-2.0",
+    "version": "1.3.4"
+  },
+  {
+    "server": "raygun.io__mcp-server-raygun",
+    "status": "ok",
+    "tools": 32,
+    "invalid": 0,
+    "license": "MIT",
+    "version": "0.1.0"
+  },
+  {
+    "server": "pinecone-database__mcp",
+    "status": "ok",
+    "tools": 9,
+    "invalid": 0,
+    "license": "Apache-2.0",
+    "version": "0.3.0"
+  },
+  {
+    "server": "dynatrace-oss__dynatrace-mcp-server",
+    "status": "failed: ExceptionGroup: unhandled errors in a TaskGroup (1 sub-exception)"
+  },
+  {
+    "server": "chargebee__mcp",
+    "status": "ok",
+    "tools": 2,
+    "invalid": 0,
+    "license": "MIT",
+    "version": "0.0.8"
+  },
+  {
+    "server": "adyen__mcp",
+    "status": "ok",
+    "tools": 38,
+    "invalid": 0,
+    "license": "MIT",
+    "version": "0.6.0"
+  },
+  {
+    "server": "awslabs.aws-documentation-mcp-server",
+    "status": "ok",
+    "tools": 5,
+    "invalid": 0,
+    "license": "Apache-2.0",
+    "version": "1.2.2"
+  },
+  {
+    "server": "mcp-server-qdrant",
+    "status": "ok",
+    "tools": 2,
+    "invalid": 0,
+    "license": "Apache-2.0",
+    "version": "0.8.1"
+  },
+  {
+    "server": "arxiv-mcp-server",
+    "status": "failed: ExceptionGroup: unhandled errors in a TaskGroup (1 sub-exception)"
+  },
+  {
+    "server": "awslabs.dynamodb-mcp-server",
+    "status": "ok",
+    "tools": 8,
+    "invalid": 0,
+    "license": "Apache-2.0",
+    "version": "2.1.8"
+  }
+]

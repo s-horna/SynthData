@@ -1,0 +1,6 @@
+.env
+data/
+artifacts/
+__pycache__/
+.venv/
+tools/library/real/_logs/

@@ -1,0 +1,15 @@
+[project]
+name = "mcp-synthdata"
+version = "0.1.0"
+description = "Synthetic MCP tool-calling conversations for SLM fine-tuning"
+requires-python = ">=3.10"
+dependencies = [
+    "data-designer>=0.9.3",
+    "mcp>=1.30",
+    "jsonschema>=4.26",
+    "httpx",
+    "pandas",
+    "pyarrow",
+    "pyyaml",
+    "python-dotenv",
+]

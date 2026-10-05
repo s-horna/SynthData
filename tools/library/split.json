@@ -1,0 +1,30 @@
+{
+  "train_domains": [
+    "automation",
+    "browser",
+    "calendar",
+    "cloud",
+    "crm",
+    "database",
+    "devtools",
+    "docs",
+    "ecommerce",
+    "email",
+    "files",
+    "image_gen",
+    "iot",
+    "media",
+    "messaging",
+    "notes",
+    "observability",
+    "payments",
+    "project_mgmt",
+    "search"
+  ],
+  "heldout_domains": [
+    "travel",
+    "hr",
+    "maps",
+    "time"
+  ]
+}
