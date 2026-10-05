@@ -5,9 +5,13 @@ scenario; the cheap model writes the user request and the teacher solves it agai
 MCP server via `tool_alias`, with full message traces.
 
 Data Designer caches an MCP provider's tool list, so a toolset can't vary per row through a
-single provider. Instead each *shard* (one Data Designer job) launches N mock-server "slots",
-one per toolset, each with its own ToolConfig. Every row is routed to its slot's trajectory
-column via `skip`, and the columns are merged afterwards.
+single provider. Instead each *shard* launches N mock-server "slots", one per toolset, each with
+its own ToolConfig. Every row is routed to its slot's trajectory column via `skip`, and the
+columns are merged afterwards.
+
+A shard runs two Data Designer jobs: first the user requests, each listing the backend records it
+refers to ("monitor 'Daily Sales Check', id mon_7Kq2xP"), then the trajectories. Each slot's mock
+server starts with its rows' records, so lookups find the items users ask about.
 
 Commands (from the repo root):
     python -m generate.generate check [--test-calls]   # Checkpoint 1: slugs, context, prices
@@ -16,12 +20,13 @@ Commands (from the repo root):
     python -m generate.generate run --full --run-name full --yes     # full run, after Checkpoint 2
 
 Runs are resumable: finished shards are skipped, interrupted shards resume inside Data Designer.
-Output: data/raw/<run>/shards/shard_XXXX.parquet (+ toolsets/, spend in data/raw/spend_ledger.jsonl).
+Output: data/raw/<run>/shards/shard_XXXX.parquet (+ requests/, toolsets/, spend in data/raw/spend_ledger.jsonl).
 """
 
 from __future__ import annotations
 
 import argparse
+import datetime
 import json
 import math
 import random
@@ -39,30 +44,135 @@ from pydantic import BaseModel, Field
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from common import ROOT, SpendLedger, api_key, fetch_models, key_usage_usd, load_config, resolve  # noqa: E402
 
+# Every assistant turn in the trace becomes a step-by-step routing label, so each turn should be one
+# deliberate decision: the right tool(s) for this step, or no tool.
+# Jinja template: `today` is a per-row seed column, so relative dates ("next Monday") can be resolved.
 TEACHER_SYSTEM_PROMPT = (
+    "Today is {{ today }}.\n"
     "You are a helpful assistant with access to tools. Use the provided tools when they are needed to "
-    "fulfil the user's request, and call them with arguments that exactly follow their schemas. Never invent "
-    "values for required parameters: if required information is missing or ambiguous, ask the user a short "
-    "clarifying question instead of calling a tool. If none of the available tools can do what the user "
-    "asks, say so plainly and do not call any tool. Independent calls may be made in parallel. If a tool "
-    "returns an error, decide whether to retry, try an alternative, or explain the failure. Finish with a "
-    "concise answer grounded in the tool results."
+    "fulfil the user's request, and call them with arguments that exactly follow their schemas.\n"
+    "- Read the tool descriptions carefully and pick the tool that does exactly what is needed; several tools "
+    "may look alike, so do not settle for one that only sounds similar.\n"
+    "- Never guess values the user did not give and that no tool can look up (dates, amounts, recipients, "
+    "names, content to write). If such a required value is missing or ambiguous, ask one short clarifying "
+    "question and do not call any tool yet.\n"
+    "- If none of the available tools can do what the user asks, say so plainly and briefly, without "
+    "calling any tool, and suggest what would be needed instead.\n"
+    "- Use the fewest calls that fully answer the request. Make independent calls together in the same turn. "
+    "When a call needs a value from another tool's result, wait for that result and use the value it returned.\n"
+    "- Do not make exploratory or verification calls: no listing or re-reading things the request does not need, "
+    "no repeating a call that already succeeded, and no fetching more pages of results than the request needs.\n"
+    "- Finish with a concise answer grounded in the tool results."
 )
 
+# Scenario instructions for the user-request writer. `{target}` / `{param}` / `{other}` are filled in per
+# row by `scenario_instructions`, so the hard scenarios are pinned to concrete tools instead of left to chance.
 SCENARIO_INSTRUCTIONS = {
-    "single_call": "The request should be fully solvable with exactly ONE call to one of the tools, and include "
-    "every value that tool's required parameters need.",
-    "sequential_multi": "The request should need 2-4 tool calls in sequence, where a later call depends on the "
-    "output of an earlier one (e.g. look something up, then act on the result).",
+    "single_call": "The request must be fully solved by exactly ONE call to `{target}`. Include, explicitly and "
+    "unambiguously, every value its required parameters need. It must not need any other tool.",
+    "sequential_multi": "The request must be ONE goal that takes two steps in order: first `{lookup}` to find "
+    "something, then `{target}` acting on it. The user does not know the `{param}` that `{target}` needs: refer "
+    "to the item only by something `{lookup}` can find it by (a name, title, date, description), so the "
+    "`{param}` can only come from `{lookup}`'s result. Give every other value `{target}` needs. Do not add "
+    "unrelated tasks.",
     "parallel": "The request should need 2-4 INDEPENDENT tool calls that can run at the same time (e.g. the same "
-    "lookup for several items, or unrelated actions in one message).",
-    "no_tool_fits": "The request must be plausible for someone using these tools, close to their domain, but NOT "
-    "achievable with any of them. Do not ask for something trivially unrelated.",
-    "needs_clarification": "The request should clearly target one of the tools but leave out a value for one of its "
-    "REQUIRED parameters that cannot be inferred (say which in missing_info), so a careful assistant must ask.",
-    "error_recovery": "The request should need 1-3 tool calls with all required values present. (The backend may "
-    "fail; the request itself should be normal.)",
+    "lookup for several items, or unrelated actions in one message). Give every value each call needs.",
+    "no_tool_fits": "The request must ask for something NONE of the tools can do, not even partially: no tool may "
+    "be able to look up, list, or make any progress on it. It should still be a plausible thing for this persona "
+    "to ask, e.g. something that needs {other} instead of the systems above. If any tool could make even partial "
+    "progress, pick a different request.",
+    "needs_clarification": "The request must clearly ask for what `{target}` does, but leave out the value of its "
+    "required parameter `{param}`. That value must be something only the user knows (not something a tool could "
+    "look up), and must not be hinted at or inferable from context. Simply omit it, the way people forget a detail: "
+    "do not announce that it is missing, promise to give it later, or refer to it by a placeholder. Include every "
+    "other required value. Describe the missing value in missing_info.",
 }
+
+OTHER_SYSTEMS = [
+    "a flight booking system", "a payroll system", "a medical records system", "a printer", "a phone's camera",
+    "a car's navigation system", "a bank's mortgage desk", "a physical mail service", "a video editing app",
+    "a music streaming account", "a tax filing service", "a food delivery app", "a ride-hailing app",
+    "a government ID portal", "a home security monitoring company", "a gym membership system",
+]
+
+
+def _needs_param(prop: dict) -> bool:
+    """Required params a user would have to supply themselves (not booleans/ids a tool could look up)."""
+    return prop.get("type") in ("string", "number", "integer", None) and "enum" not in prop
+
+
+_ID_PARAM = re.compile(r"(^|_)(id|number)$|(Id|Number)$|_ids$|uuid", re.I)
+_LOOKUP_VERBS = {"list", "search", "find", "query", "lookup", "get"}
+_GENERIC_TOKENS = _LOOKUP_VERBS | {"id", "ids", "uuid", "number", "api", "all", "by"}
+
+
+def _server(tool: dict) -> str:
+    return tool.get("id", tool["name"]).rsplit("/", 1)[0]
+
+
+def _entity_tokens(name: str) -> set[str]:
+    return {t[:-1] if t.endswith("s") and len(t) > 3 else t for t in _name_tokens(name)} - _GENERIC_TOKENS
+
+
+def dependent_pairs(tools: list[dict]) -> list[tuple[str, str, str]]:
+    """(lookup, action, param) triples where `lookup` can find the id `action` requires.
+
+    Name-based heuristic, restricted to one MCP server: `list_events` -> `delete_event(event_id)`,
+    `slack_list_channels` -> `slack_post_message(channel_id)`. The lookup must not need an id itself.
+    """
+    by_server: dict[str, list[dict]] = defaultdict(list)
+    for t in tools:
+        by_server[_server(t)].append(t)
+    pairs = []
+    for server, group in by_server.items():
+        # Server-name prefixes (`slack_`, `firecrawl_`) say nothing about the entity.
+        common = _entity_tokens(server.replace("/", " "))
+        for action in group:
+            for param in action["inputSchema"].get("required") or []:
+                if not _ID_PARAM.search(param):
+                    continue
+                entity = (_entity_tokens(param) or _entity_tokens(action["name"])) - common
+                for lookup in group:
+                    if lookup is action or not _name_tokens(lookup["name"]) & _LOOKUP_VERBS:
+                        continue
+                    if any(_ID_PARAM.search(q) for q in lookup["inputSchema"].get("required") or []):
+                        continue
+                    if entity & _entity_tokens(lookup["name"]):
+                        pairs.append((lookup["name"], action["name"], param))
+    return pairs
+
+
+def scenario_instructions(
+    scenario: str, tools: list[dict], rng: random.Random, pairs: list[tuple[str, str, str]] | None = None
+) -> tuple[str, str, str | None, str | None, str | None]:
+    """Returns (scenario, instructions, target_tool, missing_param, lookup_tool) for one row.
+
+    `pairs` restricts the lookup -> action pairs a sequential row may use (default: all in the toolset).
+    The returned scenario can differ from the requested one when the toolset can't support it.
+    """
+    target = param = lookup = None
+    if scenario == "sequential_multi":
+        pairs = dependent_pairs(tools) if pairs is None else pairs
+        if not pairs:  # no usable lookup -> action pair in this toolset
+            return scenario_instructions("single_call", tools, rng)
+        lookup, target, id_param = rng.choice(pairs)
+        text = SCENARIO_INSTRUCTIONS[scenario].format(lookup=lookup, target=target, param=id_param)
+        return scenario, text, target, None, lookup
+    if scenario == "single_call":
+        with_req = [t for t in tools if t["inputSchema"].get("required")]
+        target = rng.choice(with_req or tools)["name"]
+    elif scenario == "needs_clarification":
+        options = [
+            (t["name"], p) for t in tools for p in t["inputSchema"].get("required", []) or []
+            if _needs_param((t["inputSchema"].get("properties") or {}).get(p, {}))
+            and not re.search(r"(^|_)id$|Id$|_ids?$|uuid|token|cursor", p)
+        ]
+        if not options:  # no suitable required parameter in this toolset
+            return scenario_instructions("single_call", tools, rng)
+        target, param = rng.choice(options)
+    text = SCENARIO_INSTRUCTIONS[scenario].format(target=target, param=param, other=rng.choice(OTHER_SYSTEMS))
+    return scenario, text, target, param, lookup
+
 
 USER_REQUEST_PROMPT = """You are writing a realistic message that a user sends to an AI assistant which has access to the tools below.
 
@@ -73,21 +183,26 @@ User persona: {{ persona }}
 Phrasing style: {{ phrasing_style }}
 Difficulty: {{ difficulty }}
 
+Today's date: {{ today }}
+
 Scenario: {{ scenario_instructions }}
 
 Rules:
 - Write in the persona's voice and the requested phrasing style ("typos" = casual with a few spelling mistakes; "non-native English" = small grammar slips).
 - Use natural language. Never mention tool names, function names, parameter names, or JSON.
-- Include concrete, realistic values (names, dates, ids, amounts) where the scenario requires them.
-- Harder difficulty = more implicit intent, more steps, or details spread across the message.
+- Include concrete, realistic values (names, dates, ids, amounts) where the scenario requires them, but never give a value the scenario leaves for a tool to look up.
+- Harder difficulty = more implicit intent or details spread across the message. Never change the number or kind of tool calls the scenario asks for.
 
-Return `request` (the user's message only), `intended_tools` (tool names a perfect assistant would call, empty if none), and `missing_info` (what is deliberately missing, or null)."""
+Return `request` (the user's message only), `intended_tools` (tool names a perfect assistant would call, in call order, empty if none), `missing_info` (what is deliberately missing, or null), and `backend_records`.
+
+`backend_records` lists the records that must already exist in the tools' backend for the request to work as written: every existing item the request refers to (by name, title, date, id...), one line each, with its type, the identifying details used in the request, a realistic unique id in the backend's format, and any fields the request relies on. Example: `monitor "Daily Sales Check": id mon_7Kq2xP, url https://shop.brightleaf.io/sales, status active`. For a two-step request this is how the lookup finds the item, so the id must NOT appear in the request. Empty list if the request refers to no existing item."""
 
 
 class UserRequest(BaseModel):
     request: str = Field(description="The user's message to the assistant, verbatim.")
     intended_tools: list[str] = Field(default_factory=list, description="Tool names a perfect assistant would call.")
     missing_info: str | None = Field(default=None, description="Deliberately missing required info, if any.")
+    backend_records: list[str] = Field(default_factory=list, description="Existing backend records the request refers to.")
 
 
 # --------------------------------------------------------------------------------------------
@@ -197,40 +312,51 @@ def plan_shard(
     per_slot = g["rows_per_slot"]
     n_slots = min(g["slots_per_shard"], math.ceil(n_rows / per_slot))
 
-    weights = dict(g["scenario_weights"])
-    err_w = weights.pop("error_recovery", 0.0)
-    total_w = err_w + sum(weights.values())
-    n_err_slots = 0
-    if err_w > 0 and n_slots > 1:
-        n_err_slots = max(1, round(n_slots * err_w / total_w))
-    elif err_w > 0 and rng.random() < err_w / total_w:
-        n_err_slots = 1
+    weights = g["scenario_weights"]
+    # A few servers hold most lookup -> action pairs, so cap how often one lookup tool is reused per shard.
+    lookup_uses: dict[str, int] = defaultdict(int)
+
+    def usable_pairs(tools: list[dict]) -> list[tuple[str, str, str]]:
+        return [p for p in dependent_pairs(tools) if lookup_uses[p[0]] < g["max_lookup_repeats"]]
 
     slots, rows = [], []
     for k in range(n_slots):
+        scenarios = rng.choices(list(weights), weights=list(weights.values()), k=min(per_slot, n_rows - len(rows)))
         tools = sampler.sample(rng)
-        is_err = k < n_err_slots
-        slots.append({
-            "slot": k,
-            "tools": tools,
-            "error_rate": cfg["mock_server"]["error_recovery_error_rate" if is_err else "base_error_rate"],
-        })
-        for _ in range(per_slot):
-            if len(rows) >= n_rows:
-                break
-            scenario = "error_recovery" if is_err else rng.choices(list(weights), weights=list(weights.values()))[0]
+        # Only ~15% of random toolsets contain a lookup -> action pair, so resample for slots that need one.
+        if "sequential_multi" in scenarios:
+            for _ in range(g["sequential_resample_tries"]):
+                if usable_pairs(tools):
+                    break
+                tools = sampler.sample(rng)
+        slots.append({"slot": k, "tools": tools})
+        for scenario in scenarios:
+            scenario, instructions, target, param, lookup = scenario_instructions(
+                scenario, tools, rng, usable_pairs(tools))
+            if lookup:
+                lookup_uses[lookup] += 1
             rows.append({
                 "slot": k,
                 "scenario_type": scenario,
-                "scenario_instructions": SCENARIO_INSTRUCTIONS[scenario],
+                "scenario_instructions": instructions,
+                "target_tool": target,
+                "missing_param": param,
+                "lookup_tool": lookup,
                 "toolset_brief": toolset_brief(tools),
                 "toolset": json.dumps(tools, ensure_ascii=False),
                 "toolset_size": len(tools),
                 "primary_domain": _primary_domain(tools),
                 "source_tool_ids": json.dumps([t.get("id", t["name"]) for t in tools]),
+                "today": _random_day(rng, g["date_range"]),
             })
     rng.shuffle(rows)
     return pd.DataFrame(rows), slots
+
+
+def _random_day(rng: random.Random, date_range: list[str]) -> str:
+    lo, hi = (datetime.date.fromisoformat(d) for d in date_range)
+    day = lo + datetime.timedelta(days=rng.randint(0, (hi - lo).days))
+    return f"{day:%A, %B} {day.day}, {day.year}"
 
 
 def _primary_domain(tools: list[dict]) -> str:
@@ -275,12 +401,13 @@ def openrouter_provider(cfg: dict[str, Any]):
                             api_key=cfg["openrouter"]["api_key_env"])
 
 
-def build_shard_config(cfg: dict[str, Any], seed_df: pd.DataFrame, slots: list[dict], *, health_check: bool):
+def build_request_config(cfg: dict[str, Any], seed_df: pd.DataFrame, *, health_check: bool):
+    """Stage 1: sample persona/style/difficulty and write each row's user request (+ its backend records)."""
     import data_designer.config as dd
 
     g = cfg["generation"]
-    teacher, cheap = cfg["models"]["teacher"]["alias"], cfg["models"]["cheap"]["alias"]
-    b = dd.DataDesignerConfigBuilder(model_configs=model_configs(cfg, ["teacher", "cheap"], health_check=health_check))
+    cheap = cfg["models"]["cheap"]["alias"]
+    b = dd.DataDesignerConfigBuilder(model_configs=model_configs(cfg, ["cheap"], health_check=health_check))
     b.with_seed_dataset(dd.DataFrameSeedSource(df=seed_df), sampling_strategy=dd.SamplingStrategy.ORDERED)
 
     for name, values, weights in [
@@ -296,6 +423,17 @@ def build_shard_config(cfg: dict[str, Any], seed_df: pd.DataFrame, slots: list[d
     b.add_column(dd.LLMStructuredColumnConfig(
         name="user_request", prompt=USER_REQUEST_PROMPT, output_format=UserRequest, model_alias=cheap,
     ))
+    return b
+
+
+def build_trajectory_config(cfg: dict[str, Any], requests_df: pd.DataFrame, slots: list[dict], *, health_check: bool):
+    """Stage 2: the teacher solves each request against its slot's mock server."""
+    import data_designer.config as dd
+
+    g = cfg["generation"]
+    teacher = cfg["models"]["teacher"]["alias"]
+    b = dd.DataDesignerConfigBuilder(model_configs=model_configs(cfg, ["teacher"], health_check=health_check))
+    b.with_seed_dataset(dd.DataFrameSeedSource(df=requests_df), sampling_strategy=dd.SamplingStrategy.ORDERED)
 
     for s in slots:
         k = s["slot"]
@@ -306,7 +444,7 @@ def build_shard_config(cfg: dict[str, Any], seed_df: pd.DataFrame, slots: list[d
         b.add_column(dd.LLMTextColumnConfig(
             name=f"trajectory_s{k}",
             system_prompt=TEACHER_SYSTEM_PROMPT,
-            prompt="{{ user_request.request }}",
+            prompt="{{ request }}",
             model_alias=teacher,
             tool_alias=f"slot{k}",
             with_trace=dd.TraceType.ALL_MESSAGES,
@@ -316,7 +454,20 @@ def build_shard_config(cfg: dict[str, Any], seed_df: pd.DataFrame, slots: list[d
     return b
 
 
-def mcp_providers(cfg: dict[str, Any], slots: list[dict], toolset_dir: Path, shard: str, *, offline: bool):
+def slot_worlds(requests_df: pd.DataFrame) -> dict[int, list[str]]:
+    """Backend records each slot's mock server must contain: the union over the slot's rows."""
+    worlds: dict[int, list[str]] = defaultdict(list)
+    for _, r in requests_df.iterrows():
+        for rec in json.loads(r["user_request"]).get("backend_records") or []:
+            if rec not in worlds[int(r["slot"])]:
+                worlds[int(r["slot"])].append(rec)
+    return worlds
+
+
+def mcp_providers(
+    cfg: dict[str, Any], slots: list[dict], worlds: dict[int, list[str]], toolset_dir: Path, run: str, shard: str,
+    *, offline: bool,
+):
     import data_designer.config as dd
 
     cfg_key_env = cfg["openrouter"]["api_key_env"]
@@ -326,7 +477,11 @@ def mcp_providers(cfg: dict[str, Any], slots: list[dict], toolset_dir: Path, sha
     for s in slots:
         path = toolset_dir / f"{shard}_slot{s['slot']:02d}.json"
         path.write_text(json.dumps(s["tools"], ensure_ascii=False), encoding="utf-8")
-        args = ["-m", "mock_server.server", "--toolset", str(path), "--error-rate", str(s["error_rate"])]
+        world = path.with_name(path.stem + "_world.json")
+        world.write_text(json.dumps(worlds.get(s["slot"], []), ensure_ascii=False, indent=1), encoding="utf-8")
+        # The salt gives each slot its own (cached) responses instead of one shared answer per call.
+        args = ["-m", "mock_server.server", "--toolset", str(path), "--world", str(world),
+                "--salt", f"{run}/{shard}/slot{s['slot']}"]
         if offline:
             args.append("--offline")
         # The MCP SDK spawns servers with a minimal whitelisted env, so the key must be passed explicitly.
@@ -354,7 +509,7 @@ def merge_slots(df: pd.DataFrame, slots: list[dict], cfg: dict[str, Any], run: s
         final.append(row.get(f"trajectory_s{k}"))
         traces.append(row.get(f"trajectory_s{k}__trace"))
     slot_cols = [c for c in df.columns if re.fullmatch(r"trajectory_s\d+(__trace)?", c)]
-    out = df.drop(columns=slot_cols + ["scenario_instructions", "toolset_brief"], errors="ignore").copy()
+    out = df.drop(columns=slot_cols + ["scenario_instructions", "toolset_brief", "request"], errors="ignore").copy()
     out["final_response"] = final
     out["trace"] = [json.dumps(_to_py(t), ensure_ascii=False) if _present(t) else None for t in traces]
     out["hit_max_turns"] = [bool(t) and DEFAULT_TOOL_REFUSAL_MESSAGE in t for t in out["trace"]]
@@ -448,14 +603,32 @@ def run_generation(
             break
 
         seed_df, slots = plan_shard(sampler, cfg, run, i, rows_this)
-        providers = mcp_providers(cfg, slots, run_dir / "toolsets", shard, offline=offline)
-        builder = build_shard_config(cfg, seed_df, slots, health_check=first and not offline)
-        designer = DataDesigner(artifact_path=run_dir / "_dd", model_providers=[openrouter_provider(cfg)],
-                                mcp_providers=providers)
+        health = first and not offline
+        req_path = run_dir / "requests" / f"{shard}.parquet"
         before = key_usage_usd(cfg)
+        providers = []
         try:
-            res = designer.create(builder, num_records=len(seed_df), dataset_name=shard,
-                                  resume=ResumeMode.IF_POSSIBLE)
+            # Stage 1: user requests. Saved so a resumed shard keeps the same requests (and mock worlds).
+            if req_path.exists():
+                requests_df = pd.read_parquet(req_path)
+            else:
+                designer = DataDesigner(artifact_path=run_dir / "_dd", model_providers=[openrouter_provider(cfg)])
+                res = designer.create(build_request_config(cfg, seed_df, health_check=health), num_records=len(seed_df),
+                                      dataset_name=f"{shard}_requests", resume=ResumeMode.IF_POSSIBLE)
+                requests_df = res.load_dataset()
+                requests_df["user_request"] = [json.dumps(_to_py(u), ensure_ascii=False)
+                                               for u in requests_df["user_request"]]
+                requests_df["request"] = [json.loads(u).get("request", "") for u in requests_df["user_request"]]
+                req_path.parent.mkdir(exist_ok=True)
+                requests_df.to_parquet(req_path, index=False)
+
+            # Stage 2: trajectories, with each slot's mock server seeded with its rows' backend records.
+            providers = mcp_providers(cfg, slots, slot_worlds(requests_df), run_dir / "toolsets", run, shard,
+                                      offline=offline)
+            designer = DataDesigner(artifact_path=run_dir / "_dd", model_providers=[openrouter_provider(cfg)],
+                                    mcp_providers=providers)
+            res = designer.create(build_trajectory_config(cfg, requests_df, slots, health_check=health),
+                                  num_records=len(requests_df), dataset_name=shard, resume=ResumeMode.IF_POSSIBLE)
             df = res.load_dataset()
         finally:
             mcp_io.clear_provider_caches(providers)  # stop this shard's mock-server subprocesses

@@ -2,12 +2,12 @@
 
 Exposes whatever toolset it is given and answers calls with the cheap model:
   - arguments are validated with jsonschema; invalid ones get a realistic MCP error
-  - a configurable fraction of valid calls get an injected error
-    (timeout / not found / permission denied / rate limit)
+  - an optional "world": backend records that must exist (the items the users' requests refer to),
+    which the simulator includes wherever a call would return them
   - seeded, deterministic mode with an on-disk response cache
 
 Run as a stdio MCP server (this is how Data Designer launches it):
-    python -m mock_server.server --toolset path/to/toolset.json [--error-rate 0.07] [--offline]
+    python -m mock_server.server --toolset path/to/toolset.json [--world records.json] [--salt KEY] [--offline]
 """
 
 from __future__ import annotations
@@ -15,7 +15,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import random
 import re
 import sqlite3
 import sys
@@ -32,20 +31,20 @@ from mcp.server.stdio import stdio_server
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from common import api_key, load_config, resolve  # noqa: E402
 
-TRANSIENT = {"timeout", "rate_limit"}
-
-ERROR_TEMPLATES = {
-    "timeout": "Error: upstream request timed out after {secs}s while executing '{tool}'. The operation may be retried.",
-    "not_found": "Error 404: the requested resource was not found ({hint}).",
-    "permission_denied": "Error 403: permission denied. The current credentials lack the scope required for '{tool}'.",
-    "rate_limit": "Error 429: rate limit exceeded for '{tool}'. Retry after {secs} seconds.",
-}
-
 SIM_SYSTEM = (
     "You simulate the backend of a software tool exposed over MCP. Given the tool definition and the "
     "arguments of a call, reply with ONLY the raw result the real tool would return: realistic, internally "
     "consistent, specific values (ids, timestamps, names), consistent with the arguments. Prefer compact "
-    "JSON. Never mention that this is a simulation. No markdown fences, no commentary."
+    "JSON. Keep list results to a handful of items. If the tool is paginated, return a single complete page: "
+    "no next-page cursor or token, and has_more/hasMore false if such a field exists. Never mention that this "
+    "is a simulation. No markdown fences, no commentary. Use varied, domain-specific values; never placeholders like "
+    "example.com, foo/bar, abc123, Alice/Bob or John Doe."
+)
+
+WORLD_INSTRUCTIONS = (
+    "These records exist in the backend. Whenever this call would return or act on one of them (a list, search or "
+    "get that matches it), include it with exactly these ids and details, alongside other realistic records where "
+    "a list would have them. Never contradict them. If the call matches none of them, ignore this section."
 )
 
 
@@ -78,23 +77,20 @@ class MockBackend:
         tools: list[dict[str, Any]],
         cfg: dict[str, Any],
         *,
-        error_rate: float | None = None,
         seed: int | None = None,
+        world: list[str] | None = None,
+        salt: str = "",
         offline: bool = False,
         cache_path: Path | None = None,
     ):
         self.tools = {t["name"]: t for t in tools}
         self.cfg = cfg
-        mcfg = cfg["mock_server"]
-        self.error_rate = mcfg["base_error_rate"] if error_rate is None else error_rate
-        self.error_types = mcfg["error_types"]
-        self.retry_success = mcfg["transient_retry_success"]
-        self.deterministic = mcfg["deterministic"]
+        self.deterministic = cfg["mock_server"]["deterministic"]
         self.seed = cfg["generation"]["seed"] if seed is None else seed
+        self.world = world or []
+        self.salt = salt
         self.offline = offline
         self.cache = None if offline else ResponseCache(cache_path or resolve(cfg["paths"]["mock_cache"]))
-        self.attempts: dict[str, int] = {}
-        self.sticky_error: dict[str, str] = {}  # call_key -> error kind injected on first attempt
         self._http: httpx.AsyncClient | None = None
 
     def list_tools(self) -> list[types.Tool]:
@@ -114,31 +110,11 @@ class MockBackend:
             details = "; ".join(_describe(e) for e in errors[:3])
             return _error(f"Error -32602: invalid params for '{name}': {details}")
 
-        call_key = hashlib.sha256(_canon([self.seed, name, arguments]).encode()).hexdigest()
-        attempt = self.attempts.get(call_key, 0)
-        self.attempts[call_key] = attempt + 1
-        injected = self._pick_error(call_key, attempt)
-        if injected:
-            rng = random.Random(f"{call_key}:{attempt}:msg")
-            return _error(ERROR_TEMPLATES[injected].format(
-                tool=name, secs=rng.choice([5, 10, 30, 60]), hint=_not_found_hint(arguments)))
-
+        # Prompts, world and salt are part of the key: cached responses are regenerated when any of them change,
+        # and the same call in another slot gets its own response.
+        call_key = hashlib.sha256(_canon([self.seed, self.salt, SIM_SYSTEM, WORLD_INSTRUCTIONS, self.world, name,
+                                          arguments]).encode()).hexdigest()
         return types.CallToolResult(content=[types.TextContent(type="text", text=await self._simulate(tool, arguments, call_key))])
-
-    def _pick_error(self, call_key: str, attempt: int) -> str | None:
-        rng = random.Random(f"{call_key}:{attempt}") if self.deterministic else random.Random()
-        if attempt == 0:
-            if rng.random() >= self.error_rate:
-                return None
-            kinds, weights = zip(*self.error_types.items())
-            self.sticky_error[call_key] = rng.choices(kinds, weights=weights)[0]
-            return self.sticky_error[call_key]
-        kind = self.sticky_error.get(call_key)
-        # Persistent errors stay; transient ones usually clear on retry.
-        if kind is None or (kind in TRANSIENT and rng.random() < self.retry_success):
-            self.sticky_error.pop(call_key, None)
-            return None
-        return kind
 
     async def _simulate(self, tool: dict[str, Any], arguments: dict[str, Any], call_key: str) -> str:
         if self.offline:
@@ -153,7 +129,8 @@ class MockBackend:
                 {"role": "system", "content": SIM_SYSTEM},
                 {"role": "user", "content": (
                     f"Tool definition:\n{_canon({k: tool.get(k) for k in ('name', 'description', 'inputSchema')})}\n\n"
-                    f"Call arguments:\n{_canon(arguments)}"
+                    + (WORLD_INSTRUCTIONS + "\n" + "\n".join(f"- {r}" for r in self.world) + "\n\n" if self.world else "")
+                    + f"Call arguments:\n{_canon(arguments)}"
                 )},
             ],
             "temperature": 0.0 if self.deterministic else m["temperature"],
@@ -161,7 +138,7 @@ class MockBackend:
             **m.get("extra_body", {}),
         }
         if self.deterministic:
-            body["seed"] = self.seed
+            body["seed"] = int(call_key[:8], 16)
         if self._http is None:
             self._http = httpx.AsyncClient(
                 base_url=self.cfg["openrouter"]["endpoint"],
@@ -183,13 +160,6 @@ def _error(msg: str) -> types.CallToolResult:
 def _describe(err: Any) -> str:
     where = "/".join(str(p) for p in err.absolute_path)
     return f"{where}: {err.message}" if where else err.message
-
-
-def _not_found_hint(arguments: dict[str, Any]) -> str:
-    for k, v in arguments.items():
-        if isinstance(v, (str, int)) and re.search(r"id|name|path|key|email", k, re.I):
-            return f"{k}={v!r}"
-    return "no matching record"
 
 
 def _strip_fences(text: str) -> str:
@@ -225,13 +195,15 @@ def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--toolset", required=True, help="JSON file: list of {name, description, inputSchema, ...}")
     p.add_argument("--config", default=None)
-    p.add_argument("--error-rate", type=float, default=None)
     p.add_argument("--seed", type=int, default=None)
+    p.add_argument("--world", default=None, help="JSON file: list of backend record descriptions")
+    p.add_argument("--salt", default="", help="extra cache-key component, e.g. run/shard/slot")
     p.add_argument("--offline", action="store_true", help="stub responses, no API calls")
     a = p.parse_args()
     cfg = load_config(a.config)
     tools = json.loads(Path(a.toolset).read_text(encoding="utf-8"))
-    backend = MockBackend(tools, cfg, error_rate=a.error_rate, seed=a.seed, offline=a.offline)
+    world = json.loads(Path(a.world).read_text(encoding="utf-8")) if a.world else None
+    backend = MockBackend(tools, cfg, seed=a.seed, world=world, salt=a.salt, offline=a.offline)
     anyio.run(_serve, backend)
 
 

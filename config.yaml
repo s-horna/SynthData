@@ -75,11 +75,13 @@ generation:
     distractor_frac: 0.35   # fraction of the toolset drawn from look-alike tools
   scenario_weights:
     single_call: 0.25
-    sequential_multi: 0.20
-    parallel: 0.15
-    no_tool_fits: 0.12
-    needs_clarification: 0.13
-    error_recovery: 0.15
+    sequential_multi: 0.30   # main source of multi-step routing decisions
+    parallel: 0.17
+    no_tool_fits: 0.14
+    needs_clarification: 0.14
+  sequential_resample_tries: 30  # resample a slot's toolset until it has a lookup -> action pair
+  max_lookup_repeats: 2  # per shard: each lookup tool anchors at most this many sequential rows
+  date_range: ["2025-01-01", "2026-12-31"]  # "today" for each row, given to the request writer and teacher
   phrasing_styles: [terse, verbose, typos, non-native English]
   phrasing_weights: [3, 3, 1, 1]
   difficulties: [easy, medium, hard]
@@ -101,12 +103,4 @@ generation:
   tool_timeout_sec: 60
 
 mock_server:
-  base_error_rate: 0.07          # target 5-10%
-  error_recovery_error_rate: 0.6 # slots that host error_recovery rows
-  transient_retry_success: 0.85  # P(success) when a transient error is retried
-  error_types:
-    timeout: 0.3
-    not_found: 0.25
-    permission_denied: 0.2
-    rate_limit: 0.25
   deterministic: true
